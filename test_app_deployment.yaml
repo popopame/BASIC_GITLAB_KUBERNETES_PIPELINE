@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nodetest
+  managedFields:
+  - apiVersion: apps/v1
+  name: nodetest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nodetest
+  template:
+    metadata:
+      labels:
+        app: nodetest
+    spec:
+      containers:
+      - image: popopame/nodetest:latest
+        imagePullPolicy: Always
+        name: nodetest
+        ports:
+        - containerPort: 8080
+          protocol: TCP
+        readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30

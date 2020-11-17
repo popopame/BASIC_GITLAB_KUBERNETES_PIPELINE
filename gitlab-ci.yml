@@ -1,0 +1,125 @@
+image: node:14.4-alpine
+
+before_script:
+  - echo "always-auth=true" > .npmrc #The docker tag is composed of the sha of the commit and the branch name
+  - echo "@{NAME_OF_YOUR_ORG}:registry=https://gitlab.com/api/v4/packages/npm/" >> .npmrc #We define here the registry of your organisation
+  - echo "//gitlab.com/api/v4/packages/npm/:_authToken=${CI_JOB_TOKEN}" >> .npmrc #We set the auth ofr the reigstry as the token generated for the user that launched the pipeline
+  - echo "//gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken=${CI_JOB_TOKEN}" >> .npmrc
+
+stages:
+  - build
+  - publish_registry
+  - publish_registry_production
+  - publish_registry_dev
+  - deploy_dev
+
+build:
+ stage: build
+ script:
+   - npm install  # without any cache as we want to be sure we rebuild everything from scratch
+   - npm run build # build sources
+   - npm test # automated tests
+   - npm run package # package
+ artifacts: #Artifacts that are saved
+     name: "$CI_JOB_STAGE-$CI_COMMIT_REF_NAME"
+     paths:
+       - package/
+       - deploy/  
+ except:
+   - master
+
+buildAndPublish:
+ stage: build
+ script:
+   - npm install # without any cache as we want to be sure we rebuild everything from scratch
+   - npm run build # build sources
+   - npm test # automated tests
+   - npm run dist # package & publish to npm registry
+ artifacts:
+   name: "$CI_JOB_STAGE-$CI_COMMIT_REF_NAME"
+   paths:
+     - package/
+     - deploy/  
+ only:
+   - master 
+
+#Publish Registry will build and deploy the docker image to the private registry.
+publish_registry:
+  stage: publish_registry
+  image:
+    name: gcr.io/kaniko-project/executor:debug # We are using kaniko , a docker image provided by google that allow to build docker image in a non-privileged env
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker #Creation of the config file of kaniko
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # We pass the identifications variables in the config
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:${CI_COMMIT_SHORT_SHA}_${CI_COMMIT_REF_NAME} --build-arg NODE_ENV_NAME=$CI_COMMIT_REF_NAME #We then can create the docker image and push to the 
+  except:
+    - master
+
+
+#Publish_registery_production will tag the docker image as latest , to enable deployment to the K8s Cluster
+publish_registry_production:
+  stage: publish_registry_production
+  image:
+    name: gcr.io/kaniko-project/executor:debug # We arre using kaniko , a docker image provided by google that allow to build docker image in a non-privileged
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker 
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # We pass the identifications variables in the config
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:latest --build-arg NODE_ENV_NAME=production
+  only:
+    - production
+
+#Publish_registery_dev will only execute on the master branch, as it is the main dev branchn to overwrite the branch name
+publish_registry_dev:
+  stage: publish_registry_production
+  image:
+    name: gcr.io/kaniko-project/executor:debug # We arre using kaniko , a docker image provided by google that allow to build docker image in a non-privileged
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker 
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # We pass the identifications variables in the config
+    - /kaniko/executor --context $CI_PROJECT_DIR --build-arg NODE_ENV_NAME=dev --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:${CI_COMMIT_SHORT_SHA}_dev 
+  only:
+    - master
+
+
+#.deploy is a template that is extended depending on the branch
+# each branch is linked to a environement , thet master is used as dev
+.deploy:
+  stage: deploy 
+  image: 
+    name: bitnami/kubectl # Docker image withkubectl
+    entrypoint: [""]
+  dependencies:
+    - publish_registry
+# The scripts for the .deploy stage is mainly used for setting the kubeconfig , wich is the config file for kubectl
+  script:
+    - echo $KUBECONFIG64 | base64 -d > $KUBECONFIG
+    - kubectl set image deployment/$NAMESPACE-$CI_PROJECT_TITLE $NAMESPACE-$CI_PROJECT_TITLE-container=$CI_REGISTRY_IMAGE:$DOCKER_TAG
+
+#Each stage marked as deploy_{something} is constructed like so:
+deploy_dev:
+  stage: deploy_dev
+  extends: .deploy # Extend the .deploy stage 
+  environment:
+      name: dev
+  variables:
+    NAMESPACE: dev # definition of the namespace , usually the name of the branch , the master branch being the only exeption , as it is the dev
+    KUBECONFIG64: $DEV_KUBECONFIG64
+    DOCKER_TAG: ${CI_COMMIT_SHORT_SHA}_dev 
+  only:
+    - master
+
+#deploy_production:
+#  stage: deploy_production
+#  extends: .deploy
+#  environment:
+#      name: production 
+#  variables:
+#    SERVER: $DEV_SERVER
+#    SERVER_USER_TOKEN: $DEV_USER_TOKEN
+#    SERVER_CA: $DEV_SERVER_CA
+#    DOCKER_TAG: latest
+#  only:
+#    - production
