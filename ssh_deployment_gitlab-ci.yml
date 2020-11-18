@@ -1,0 +1,122 @@
+image: node:14.4-alpine
+
+before_script:
+  - echo "always-auth=true" > .npmrc #The docker tag is composed of the sha of the commit and the branch name
+  - echo "@{NAME_OF_YOUR_ORG}:registry=https://gitlab.com/api/v4/packages/npm/" >> .npmrc #We define here the registry of your organisation
+  - echo "//gitlab.com/api/v4/packages/npm/:_authToken=${CI_JOB_TOKEN}" >> .npmrc #We set the auth ofr the reigstry as the token generated for the user that launched the pipeline
+  - echo "//gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/npm/:_authToken=${CI_JOB_TOKEN}" >> .npmrc
+
+stages:
+  - build
+  - publish_registry
+  - publish_registry_production
+  - publish_registry_dev
+  - deploy_dev
+
+build:
+ stage: build
+ script:
+   - npm install  # without any cache as we want to be sure we rebuild everything from scratch
+   - npm run build # build sources
+   - npm test # automated tests
+   - npm run package # package
+ artifacts: #Artifacts that are saved
+     name: "$CI_JOB_STAGE-$CI_COMMIT_REF_NAME"
+     paths:
+       - package/
+       - deploy/  
+ except:
+   - master
+
+buildAndPublish:
+ stage: build
+ script:
+   - npm install # without any cache as we want to be sure we rebuild everything from scratch
+   - npm run build # build sources
+   - npm test # automated tests
+   - npm run dist # package & publish to npm registry
+ artifacts:
+   name: "$CI_JOB_STAGE-$CI_COMMIT_REF_NAME"
+   paths:
+     - package/
+     - deploy/  
+ only:
+   - master 
+
+#Publish Registry will build and deploy the docker image to the private registry.
+publish_registry:
+  stage: publish_registry
+  image:
+    name: gcr.io/kaniko-project/executor:debug # We are using kaniko , a docker image provided by google that allow to build docker image in a non-privileged env
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker #Creation of the config file of kaniko
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # We pass the identifications variables in the config
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:${CI_COMMIT_SHORT_SHA}_${CI_COMMIT_REF_NAME} --build-arg NODE_ENV_NAME=$CI_COMMIT_REF_NAME #We then can create the docker image and push to the 
+  except:
+    - master
+
+
+#Publish_registery_production will tag the docker image as latest , to enable deployment to the K8s Cluster
+publish_registry_production:
+  stage: publish_registry_production
+  image:
+    name: gcr.io/kaniko-project/executor:debug # We arre using kaniko , a docker image provided by google that allow to build docker image in a non-privileged
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker 
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # We pass the identifications variables in the config
+    - /kaniko/executor --context $CI_PROJECT_DIR --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:latest --build-arg NODE_ENV_NAME=production
+  only:
+    - production
+
+#Publish_registery_dev will only execute on the master branch, as it is the main dev branchn to overwrite the branch name
+publish_registry_dev:
+  stage: publish_registry_production
+  image:
+    name: gcr.io/kaniko-project/executor:debug # We arre using kaniko , a docker image provided by google that allow to build docker image in a non-privileged
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker 
+    - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # We pass the identifications variables in the config
+    - /kaniko/executor --context $CI_PROJECT_DIR --build-arg NODE_ENV_NAME=dev --dockerfile $CI_PROJECT_DIR/Dockerfile --destination $CI_REGISTRY_IMAGE:${CI_COMMIT_SHORT_SHA}_dev 
+  only:
+    - master
+
+#This deploy stage will deploy the code to the server via SSH
+.deploy:
+  stage: deploy
+  dependencies: 
+    - build
+  before_script: #Before script will prepare the runner for the ssh connection: setting the private key managing the permission, etc...
+    # prepare ssh connection
+    - which ssh-agent || apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -t rsa $TARGET_SERVER >> ~/.ssh/known_hosts
+  script:
+    - echo "deploying to $TARGET_SERVER:$TARGET_DIR"
+    # stop running service
+    - ssh $DEPLOY_USER@$TARGET_SERVER "if [ -d $TARGET_DIR ]; then cd $TARGET_DIR && docker-compose down; fi"
+    # copy artifacts to target server
+    - ssh $DEPLOY_USER@$TARGET_SERVER "rm -Rf $TARGET_DIR-old && if [ -d $TARGET_DIR ]; then mv $TARGET_DIR $TARGET_DIR-old; fi && mkdir -p $TARGET_DIR"
+    - scp -r package/* deploy/* $DEPLOY_USER@$TARGET_SERVER:$TARGET_DIR
+    # set environment
+    - ssh $DEPLOY_USER@$TARGET_SERVER "cd $TARGET_DIR && echo 'NODE_CONFIG_ENV=$CI_ENVIRONMENT_NAME' > .env && echo 'NODE_OPTIONS=$NODE_OPTIONS' >> .env"
+    # run deploy script
+    - ssh $DEPLOY_USER@$TARGET_SERVER "cd $TARGET_DIR && ./deploy.sh"
+
+# deploy is automatically run from master to test env
+deploy_test:
+  extends: .deploy
+  environment:
+    name: test
+  variables:
+    TARGET_SERVER: 102.120.102.120
+    TARGET_DIR: /home/centos/$CI_PROJECT_NAME
+    DEPLOY_USER: centos
+    NODE_OPTIONS: --max-old-space-size=4096
+  only:
+    - master
