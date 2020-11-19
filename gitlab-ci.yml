@@ -48,7 +48,7 @@ publish_registry:
   stage: publish_registry
   image:
     name: gcr.io/kaniko-project/executor:debug # We are using kaniko , a docker image provided by google that allow to build docker image in a non-privileged env
-    entrypoint: [""]
+    entrypoint: [""] #The entrypoint is set on blank to allow the execution of other commands than kaniko 
   script:
     - mkdir -p /kaniko/.docker #Creation of the config file of kaniko
     - echo "{\"auths\":{\"$CI_REGISTRY\":{\"username\":\"$CI_REGISTRY_USER\",\"password\":\"$CI_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json # We pass the identifications variables in the config
@@ -90,13 +90,13 @@ publish_registry_dev:
   stage: deploy 
   image: 
     name: bitnami/kubectl # Docker image withkubectl
-    entrypoint: [""]
+    entrypoint: [""] #The entrypoint is set as blank to allow the execution of other linux command than kubectl
   dependencies:
     - publish_registry
 # The scripts for the .deploy stage is mainly used for setting the kubeconfig , wich is the config file for kubectl
   script:
-    - echo $KUBECONFIG64 | base64 -d > $KUBECONFIG
-    - kubectl set image deployment/$NAMESPACE-$CI_PROJECT_TITLE $NAMESPACE-$CI_PROJECT_TITLE-container=$CI_REGISTRY_IMAGE:$DOCKER_TAG
+    - echo $KUBECONFIG64 | base64 -d > $KUBECONFIG #The  kubeconfig is encoded in base64, this facilitate the manipulation of the file
+    - kubectl set image deployment/$NAMESPACE-$CI_PROJECT_TITLE $NAMESPACE-$CI_PROJECT_TITLE-container=$CI_REGISTRY_IMAGE:$DOCKER_TAG  #Again I use a lot oof predefined vars by gitlab, but if you naming scheme is well thought,an coherent between every solution you use (terraform,helm, and else) the management of you infra is eased
 
 #Each stage marked as deploy_{something} is constructed like so:
 deploy_dev:
